@@ -12,7 +12,7 @@ func TestRender(t *testing.T) {
 		Expected      string
 	}{
 		{
-			`resource "template_cloudinit_config" "foo" {
+			`data "template_cloudinit_config" "foo" {
 				gzip = false
 				base64_encode = false
 
@@ -24,7 +24,7 @@ func TestRender(t *testing.T) {
 			"Content-Type: multipart/mixed; boundary=\"MIMEBOUNDRY\"\nMIME-Version: 1.0\r\n--MIMEBOUNDRY\r\nContent-Transfer-Encoding: 7bit\r\nContent-Type: text/x-shellscript\r\nMime-Version: 1.0\r\n\r\nbaz\r\n--MIMEBOUNDRY--\r\n",
 		},
 		{
-			`resource "template_cloudinit_config" "foo" {
+			`data "template_cloudinit_config" "foo" {
 				gzip = false
 				base64_encode = false
 
@@ -37,7 +37,7 @@ func TestRender(t *testing.T) {
 			"Content-Type: multipart/mixed; boundary=\"MIMEBOUNDRY\"\nMIME-Version: 1.0\r\n--MIMEBOUNDRY\r\nContent-Disposition: attachment; filename=\"foobar.sh\"\r\nContent-Transfer-Encoding: 7bit\r\nContent-Type: text/x-shellscript\r\nMime-Version: 1.0\r\n\r\nbaz\r\n--MIMEBOUNDRY--\r\n",
 		},
 		{
-			`resource "template_cloudinit_config" "foo" {
+			`data "template_cloudinit_config" "foo" {
 				gzip = false
 				base64_encode = false
 
@@ -53,7 +53,7 @@ func TestRender(t *testing.T) {
 			"Content-Type: multipart/mixed; boundary=\"MIMEBOUNDRY\"\nMIME-Version: 1.0\r\n--MIMEBOUNDRY\r\nContent-Transfer-Encoding: 7bit\r\nContent-Type: text/x-shellscript\r\nMime-Version: 1.0\r\n\r\nbaz\r\n--MIMEBOUNDRY\r\nContent-Transfer-Encoding: 7bit\r\nContent-Type: text/x-shellscript\r\nMime-Version: 1.0\r\n\r\nffbaz\r\n--MIMEBOUNDRY--\r\n",
 		},
 		{
-			`resource "template_cloudinit_config" "foo" {
+			`data "template_cloudinit_config" "foo" {
 				gzip = true
 				base64_encode = false
 
@@ -72,13 +72,13 @@ func TestRender(t *testing.T) {
 	}
 
 	for _, tt := range testCases {
-		r.Test(t, r.TestCase{
+		r.UnitTest(t, r.TestCase{
 			Providers: testProviders,
 			Steps: []r.TestStep{
 				r.TestStep{
 					Config: tt.ResourceBlock,
 					Check: r.ComposeTestCheckFunc(
-						r.TestCheckResourceAttr("template_cloudinit_config.foo", "rendered", tt.Expected),
+						r.TestCheckResourceAttr("data.template_cloudinit_config.foo", "rendered", tt.Expected),
 					),
 				},
 			},
@@ -87,20 +87,20 @@ func TestRender(t *testing.T) {
 }
 
 func TestCloudConfig_update(t *testing.T) {
-	r.Test(t, r.TestCase{
+	r.UnitTest(t, r.TestCase{
 		Providers: testProviders,
 		Steps: []r.TestStep{
 			r.TestStep{
 				Config: testCloudInitConfig_basic,
 				Check: r.ComposeTestCheckFunc(
-					r.TestCheckResourceAttr("template_cloudinit_config.config", "rendered", testCloudInitConfig_basic_expected),
+					r.TestCheckResourceAttr("data.template_cloudinit_config.config", "rendered", testCloudInitConfig_basic_expected),
 				),
 			},
 
 			r.TestStep{
 				Config: testCloudInitConfig_update,
 				Check: r.ComposeTestCheckFunc(
-					r.TestCheckResourceAttr("template_cloudinit_config.config", "rendered", testCloudInitConfig_update_expected),
+					r.TestCheckResourceAttr("data.template_cloudinit_config.config", "rendered", testCloudInitConfig_update_expected),
 				),
 			},
 		},
@@ -108,7 +108,7 @@ func TestCloudConfig_update(t *testing.T) {
 }
 
 var testCloudInitConfig_basic = `
-resource "template_cloudinit_config" "config" {
+data "template_cloudinit_config" "config" {
   part {
     content_type = "text/x-shellscript"
     content      = "baz"
@@ -118,7 +118,7 @@ resource "template_cloudinit_config" "config" {
 var testCloudInitConfig_basic_expected = `Content-Type: multipart/mixed; boundary=\"MIMEBOUNDRY\"\nMIME-Version: 1.0\r\n--MIMEBOUNDRY\r\nContent-Transfer-Encoding: 7bit\r\nContent-Type: text/x-shellscript\r\nMime-Version: 1.0\r\n\r\nbaz\r\n--MIMEBOUNDRY--\r\n`
 
 var testCloudInitConfig_update = `
-resource "template_cloudinit_config" "config" {
+data "template_cloudinit_config" "config" {
   part {
     content_type = "text/x-shellscript"
     content      = "baz"

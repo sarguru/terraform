@@ -29,7 +29,7 @@ func TestTemplateRendering(t *testing.T) {
 	}
 
 	for _, tt := range cases {
-		r.Test(t, r.TestCase{
+		r.UnitTest(t, r.TestCase{
 			Providers: testProviders,
 			Steps: []r.TestStep{
 				r.TestStep{
@@ -41,6 +41,10 @@ func TestTemplateRendering(t *testing.T) {
 						}
 						return nil
 					},
+
+					// Data sources are always eager to refresh, so they will
+					// never stop generating diffs when asked.
+					ExpectNonEmptyPlan: true,
 				},
 			},
 		})
@@ -71,6 +75,10 @@ func TestTemplateVariableChange(t *testing.T) {
 					return nil
 				}
 			}(i, step.want),
+
+			// Data sources are always eager to refresh, so they will
+			// never stop generating diffs when asked.
+			ExpectNonEmptyPlan: true,
 		})
 	}
 
@@ -129,11 +137,11 @@ func TestTemplateSharedMemoryRace(t *testing.T) {
 
 func testTemplateConfig(template, vars string) string {
 	return fmt.Sprintf(`
-		resource "template_file" "t0" {
+		data "template_file" "t0" {
 			template = "%s"
 			vars = %s
 		}
 		output "rendered" {
-				value = "${template_file.t0.rendered}"
+				value = "${data.template_file.t0.rendered}"
 		}`, template, vars)
 }
