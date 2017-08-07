@@ -4,12 +4,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"io/ioutil"
 	"net/http"
+	"os"
 
 	"github.com/gophercloud/gophercloud"
 	"github.com/gophercloud/gophercloud/openstack"
 	"github.com/gophercloud/gophercloud/openstack/objectstorage/v1/swauth"
+	"github.com/hashicorp/terraform/helper/pathorcontents"
+	"github.com/hashicorp/terraform/terraform"
 )
 
 type Config struct {
@@ -68,15 +70,18 @@ func (c *Config) loadAndValidate() error {
 		return err
 	}
 
+	// Set UserAgent
+	client.UserAgent.Prepend(terraform.UserAgentString())
+
 	config := &tls.Config{}
 	if c.CACertFile != "" {
-		caCert, err := ioutil.ReadFile(c.CACertFile)
+		caCert, _, err := pathorcontents.Read(c.CACertFile)
 		if err != nil {
-			return err
+			return fmt.Errorf("Error reading CA Cert: %s", err)
 		}
 
 		caCertPool := x509.NewCertPool()
-		caCertPool.AppendCertsFromPEM(caCert)
+		caCertPool.AppendCertsFromPEM([]byte(caCert))
 		config.RootCAs = caCertPool
 	}
 
@@ -85,7 +90,16 @@ func (c *Config) loadAndValidate() error {
 	}
 
 	if c.ClientCertFile != "" && c.ClientKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(c.ClientCertFile, c.ClientKeyFile)
+		clientCert, _, err := pathorcontents.Read(c.ClientCertFile)
+		if err != nil {
+			return fmt.Errorf("Error reading Client Cert: %s", err)
+		}
+		clientKey, _, err := pathorcontents.Read(c.ClientKeyFile)
+		if err != nil {
+			return fmt.Errorf("Error reading Client Key: %s", err)
+		}
+
+		cert, err := tls.X509KeyPair([]byte(clientCert), []byte(clientKey))
 		if err != nil {
 			return err
 		}
@@ -94,8 +108,19 @@ func (c *Config) loadAndValidate() error {
 		config.BuildNameToCertificate()
 	}
 
+	// if OS_DEBUG is set, log the requests and responses
+	var osDebug bool
+	if os.Getenv("OS_DEBUG") != "" {
+		osDebug = true
+	}
+
 	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: config}
-	client.HTTPClient.Transport = transport
+	client.HTTPClient = http.Client{
+		Transport: &LogRoundTripper{
+			Rt:      transport,
+			OsDebug: osDebug,
+		},
+	}
 
 	// If using Swift Authentication, there's no need to validate authentication normally.
 	if !c.Swauth {
@@ -126,6 +151,20 @@ func (c *Config) blockStorageV2Client(region string) (*gophercloud.ServiceClient
 
 func (c *Config) computeV2Client(region string) (*gophercloud.ServiceClient, error) {
 	return openstack.NewComputeV2(c.osClient, gophercloud.EndpointOpts{
+		Region:       region,
+		Availability: c.getEndpointType(),
+	})
+}
+
+func (c *Config) dnsV2Client(region string) (*gophercloud.ServiceClient, error) {
+	return openstack.NewDNSV2(c.osClient, gophercloud.EndpointOpts{
+		Region:       region,
+		Availability: c.getEndpointType(),
+	})
+}
+
+func (c *Config) imageV2Client(region string) (*gophercloud.ServiceClient, error) {
+	return openstack.NewImageServiceV2(c.osClient, gophercloud.EndpointOpts{
 		Region:       region,
 		Availability: c.getEndpointType(),
 	})

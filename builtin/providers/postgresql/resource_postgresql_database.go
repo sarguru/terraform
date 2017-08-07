@@ -32,6 +32,7 @@ func resourcePostgreSQLDatabase() *schema.Resource {
 		Read:   resourcePostgreSQLDatabaseRead,
 		Update: resourcePostgreSQLDatabaseUpdate,
 		Delete: resourcePostgreSQLDatabaseDelete,
+		Exists: resourcePostgreSQLDatabaseExists,
 		Importer: &schema.ResourceImporter{
 			State: schema.ImportStatePassthrough,
 		},
@@ -46,7 +47,7 @@ func resourcePostgreSQLDatabase() *schema.Resource {
 				Type:        schema.TypeString,
 				Optional:    true,
 				Computed:    true,
-				Description: "The role name of the user who will own the new database",
+				Description: "The ROLE which owns the database",
 			},
 			dbTemplateAttr: {
 				Type:        schema.TypeString,
@@ -85,7 +86,7 @@ func resourcePostgreSQLDatabase() *schema.Resource {
 			dbConnLimitAttr: {
 				Type:         schema.TypeInt,
 				Optional:     true,
-				Computed:     true,
+				Default:      -1,
 				Description:  "How many concurrent connections can be made to this database",
 				ValidateFunc: validateConnLimit,
 			},
@@ -107,6 +108,10 @@ func resourcePostgreSQLDatabase() *schema.Resource {
 
 func resourcePostgreSQLDatabaseCreate(d *schema.ResourceData, meta interface{}) error {
 	c := meta.(*Client)
+
+	c.catalogLock.Lock()
+	defer c.catalogLock.Unlock()
+
 	conn, err := c.Connect()
 	if err != nil {
 		return errwrap.Wrapf("Error connecting to PostgreSQL: {{err}}", err)
@@ -116,6 +121,19 @@ func resourcePostgreSQLDatabaseCreate(d *schema.ResourceData, meta interface{}) 
 	dbName := d.Get(dbNameAttr).(string)
 	b := bytes.NewBufferString("CREATE DATABASE ")
 	fmt.Fprint(b, pq.QuoteIdentifier(dbName))
+
+	//needed in order to set the owner of the db if the connection user is not a superuser
+	err = grantRoleMembership(conn, d.Get(dbOwnerAttr).(string), c.username)
+	if err != nil {
+		return errwrap.Wrapf(fmt.Sprintf("Error adding connection user (%q) to ROLE %q: {{err}}", c.username, d.Get(dbOwnerAttr).(string)), err)
+	}
+	defer func() {
+		//undo the grant if the connection user is not a superuser
+		err = revokeRoleMembership(conn, d.Get(dbOwnerAttr).(string), c.username)
+		if err != nil {
+			err = errwrap.Wrapf(fmt.Sprintf("Error removing connection user (%q) from ROLE %q: {{err}}", c.username, d.Get(dbOwnerAttr).(string)), err)
+		}
+	}()
 
 	// Handle each option individually and stream results into the query
 	// buffer.
@@ -179,16 +197,22 @@ func resourcePostgreSQLDatabaseCreate(d *schema.ResourceData, meta interface{}) 
 	query := b.String()
 	_, err = conn.Query(query)
 	if err != nil {
-		return errwrap.Wrapf(fmt.Sprintf("Error creating database %s: {{err}}", dbName), err)
+		return errwrap.Wrapf(fmt.Sprintf("Error creating database %q: {{err}}", dbName), err)
 	}
 
 	d.SetId(dbName)
 
-	return resourcePostgreSQLDatabaseRead(d, meta)
+	// Set err outside of the return so that the deferred revoke can override err
+	// if necessary.
+	err = resourcePostgreSQLDatabaseReadImpl(d, meta)
+	return err
 }
 
 func resourcePostgreSQLDatabaseDelete(d *schema.ResourceData, meta interface{}) error {
 	c := meta.(*Client)
+	c.catalogLock.Lock()
+	defer c.catalogLock.Unlock()
+
 	conn, err := c.Connect()
 	if err != nil {
 		return errwrap.Wrapf("Error connecting to PostgreSQL: {{err}}", err)
@@ -220,7 +244,38 @@ func resourcePostgreSQLDatabaseDelete(d *schema.ResourceData, meta interface{}) 
 	return nil
 }
 
+func resourcePostgreSQLDatabaseExists(d *schema.ResourceData, meta interface{}) (bool, error) {
+	c := meta.(*Client)
+	c.catalogLock.RLock()
+	defer c.catalogLock.RUnlock()
+
+	conn, err := c.Connect()
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close()
+
+	var dbName string
+	err = conn.QueryRow("SELECT d.datname from pg_database d WHERE datname=$1", d.Id()).Scan(&dbName)
+	switch {
+	case err == sql.ErrNoRows:
+		return false, nil
+	case err != nil:
+		return false, err
+	}
+
+	return true, nil
+}
+
 func resourcePostgreSQLDatabaseRead(d *schema.ResourceData, meta interface{}) error {
+	c := meta.(*Client)
+	c.catalogLock.RLock()
+	defer c.catalogLock.RUnlock()
+
+	return resourcePostgreSQLDatabaseReadImpl(d, meta)
+}
+
+func resourcePostgreSQLDatabaseReadImpl(d *schema.ResourceData, meta interface{}) error {
 	c := meta.(*Client)
 	conn, err := c.Connect()
 	if err != nil {
@@ -233,7 +288,7 @@ func resourcePostgreSQLDatabaseRead(d *schema.ResourceData, meta interface{}) er
 	err = conn.QueryRow("SELECT d.datname, pg_catalog.pg_get_userbyid(d.datdba) from pg_database d WHERE datname=$1", dbId).Scan(&dbName, &ownerName)
 	switch {
 	case err == sql.ErrNoRows:
-		log.Printf("[WARN] PostgreSQL database (%s) not found", dbId)
+		log.Printf("[WARN] PostgreSQL database (%q) not found", dbId)
 		d.SetId("")
 		return nil
 	case err != nil:
@@ -250,7 +305,7 @@ func resourcePostgreSQLDatabaseRead(d *schema.ResourceData, meta interface{}) er
 		)
 	switch {
 	case err == sql.ErrNoRows:
-		log.Printf("[WARN] PostgreSQL database (%s) not found", dbId)
+		log.Printf("[WARN] PostgreSQL database (%q) not found", dbId)
 		d.SetId("")
 		return nil
 	case err != nil:
@@ -276,6 +331,9 @@ func resourcePostgreSQLDatabaseRead(d *schema.ResourceData, meta interface{}) er
 
 func resourcePostgreSQLDatabaseUpdate(d *schema.ResourceData, meta interface{}) error {
 	c := meta.(*Client)
+	c.catalogLock.Lock()
+	defer c.catalogLock.Unlock()
+
 	conn, err := c.Connect()
 	if err != nil {
 		return err
@@ -286,7 +344,7 @@ func resourcePostgreSQLDatabaseUpdate(d *schema.ResourceData, meta interface{}) 
 		return err
 	}
 
-	if err := setDBOwner(conn, d); err != nil {
+	if err := setDBOwner(c, conn, d); err != nil {
 		return err
 	}
 
@@ -308,7 +366,7 @@ func resourcePostgreSQLDatabaseUpdate(d *schema.ResourceData, meta interface{}) 
 
 	// Empty values: ALTER DATABASE name RESET configuration_parameter;
 
-	return resourcePostgreSQLDatabaseRead(d, meta)
+	return resourcePostgreSQLDatabaseReadImpl(d, meta)
 }
 
 func setDBName(conn *sql.DB, d *schema.ResourceData) error {
@@ -332,7 +390,7 @@ func setDBName(conn *sql.DB, d *schema.ResourceData) error {
 	return nil
 }
 
-func setDBOwner(conn *sql.DB, d *schema.ResourceData) error {
+func setDBOwner(c *Client, conn *sql.DB, d *schema.ResourceData) error {
 	if !d.HasChange(dbOwnerAttr) {
 		return nil
 	}
@@ -342,13 +400,26 @@ func setDBOwner(conn *sql.DB, d *schema.ResourceData) error {
 		return nil
 	}
 
+	//needed in order to set the owner of the db if the connection user is not a superuser
+	err := grantRoleMembership(conn, d.Get(dbOwnerAttr).(string), c.username)
+	if err != nil {
+		return errwrap.Wrapf(fmt.Sprintf("Error adding connection user (%q) to ROLE %q: {{err}}", c.username, d.Get(dbOwnerAttr).(string)), err)
+	}
+	defer func() {
+		// undo the grant if the connection user is not a superuser
+		err = revokeRoleMembership(conn, d.Get(dbOwnerAttr).(string), c.username)
+		if err != nil {
+			err = errwrap.Wrapf(fmt.Sprintf("Error removing connection user (%q) from ROLE %q: {{err}}", c.username, d.Get(dbOwnerAttr).(string)), err)
+		}
+	}()
+
 	dbName := d.Get(dbNameAttr).(string)
 	query := fmt.Sprintf("ALTER DATABASE %s OWNER TO %s", pq.QuoteIdentifier(dbName), pq.QuoteIdentifier(owner))
 	if _, err := conn.Query(query); err != nil {
 		return errwrap.Wrapf("Error updating database OWNER: {{err}}", err)
 	}
 
-	return nil
+	return err
 }
 
 func setDBTablespace(conn *sql.DB, d *schema.ResourceData) error {
@@ -420,5 +491,31 @@ func doSetDBIsTemplate(conn *sql.DB, dbName string, isTemplate bool) error {
 		return errwrap.Wrapf("Error updating database IS_TEMPLATE: {{err}}", err)
 	}
 
+	return nil
+}
+
+func grantRoleMembership(conn *sql.DB, dbOwner string, connUsername string) error {
+	if dbOwner != "" && dbOwner != connUsername {
+		query := fmt.Sprintf("GRANT %s TO %s", pq.QuoteIdentifier(dbOwner), pq.QuoteIdentifier(connUsername))
+		_, err := conn.Query(query)
+		if err != nil {
+			// is already member or role
+			if strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
+				return nil
+			}
+			return errwrap.Wrapf("Error granting membership: {{err}}", err)
+		}
+	}
+	return nil
+}
+
+func revokeRoleMembership(conn *sql.DB, dbOwner string, connUsername string) error {
+	if dbOwner != "" && dbOwner != connUsername {
+		query := fmt.Sprintf("REVOKE %s FROM %s", pq.QuoteIdentifier(dbOwner), pq.QuoteIdentifier(connUsername))
+		_, err := conn.Query(query)
+		if err != nil {
+			return errwrap.Wrapf("Error revoking membership: {{err}}", err)
+		}
+	}
 	return nil
 }

@@ -18,6 +18,9 @@ func resourceArmLoadBalancerProbe() *schema.Resource {
 		Read:   resourceArmLoadBalancerProbeRead,
 		Update: resourceArmLoadBalancerProbeCreate,
 		Delete: resourceArmLoadBalancerProbeDelete,
+		Importer: &schema.ResourceImporter{
+			State: loadBalancerSubResourceStateImporter,
+		},
 
 		Schema: map[string]*schema.Schema{
 			"name": {
@@ -26,7 +29,7 @@ func resourceArmLoadBalancerProbe() *schema.Resource {
 				ForceNew: true,
 			},
 
-			"location": locationSchema(),
+			"location": deprecatedLocationSchema(),
 
 			"resource_group_name": {
 				Type:     schema.TypeString,
@@ -41,9 +44,11 @@ func resourceArmLoadBalancerProbe() *schema.Resource {
 			},
 
 			"protocol": {
-				Type:     schema.TypeString,
-				Computed: true,
-				Optional: true,
+				Type:             schema.TypeString,
+				Computed:         true,
+				Optional:         true,
+				StateFunc:        ignoreCaseStateFunc,
+				DiffSuppressFunc: ignoreCaseDiffSuppressFunc,
 			},
 
 			"port": {
@@ -54,7 +59,6 @@ func resourceArmLoadBalancerProbe() *schema.Resource {
 			"request_path": {
 				Type:     schema.TypeString,
 				Optional: true,
-				Computed: true,
 			},
 
 			"interval_in_seconds": {
@@ -69,7 +73,7 @@ func resourceArmLoadBalancerProbe() *schema.Resource {
 				Default:  2,
 			},
 
-			"load_balance_rules": {
+			"load_balancer_rules": {
 				Type:     schema.TypeSet,
 				Computed: true,
 				Elem:     &schema.Schema{Type: schema.TypeString},
@@ -106,11 +110,9 @@ func resourceArmLoadBalancerProbeCreate(d *schema.ResourceData, meta interface{}
 
 	existingProbe, existingProbeIndex, exists := findLoadBalancerProbeByName(loadBalancer, d.Get("name").(string))
 	if exists {
-		if d.Id() == *existingProbe.ID {
-			// this probe is being updated remove old copy from the slice
+		if d.Get("name").(string) == *existingProbe.Name {
+			// this probe is being updated/reapplied remove old copy from the slice
 			probes = append(probes[:existingProbeIndex], probes[existingProbeIndex+1:]...)
-		} else {
-			return fmt.Errorf("A Probe with name %q already exists.", d.Get("name").(string))
 		}
 	}
 
@@ -120,7 +122,8 @@ func resourceArmLoadBalancerProbeCreate(d *schema.ResourceData, meta interface{}
 		return errwrap.Wrapf("Error Getting LoadBalancer Name and Group: {{err}}", err)
 	}
 
-	_, err = lbClient.CreateOrUpdate(resGroup, loadBalancerName, *loadBalancer, make(chan struct{}))
+	_, error := lbClient.CreateOrUpdate(resGroup, loadBalancerName, *loadBalancer, make(chan struct{}))
+	err = <-error
 	if err != nil {
 		return errwrap.Wrapf("Error Creating/Updating LoadBalancer {{err}}", err)
 	}
@@ -161,30 +164,44 @@ func resourceArmLoadBalancerProbeCreate(d *schema.ResourceData, meta interface{}
 }
 
 func resourceArmLoadBalancerProbeRead(d *schema.ResourceData, meta interface{}) error {
+	id, err := parseAzureResourceID(d.Id())
+	if err != nil {
+		return err
+	}
+	name := id.Path["probes"]
+
 	loadBalancer, exists, err := retrieveLoadBalancerById(d.Get("loadbalancer_id").(string), meta)
 	if err != nil {
 		return errwrap.Wrapf("Error Getting LoadBalancer By ID {{err}}", err)
 	}
 	if !exists {
 		d.SetId("")
-		log.Printf("[INFO] LoadBalancer %q not found. Removing from state", d.Get("name").(string))
+		log.Printf("[INFO] LoadBalancer %q not found. Removing from state", name)
 		return nil
 	}
 
-	configs := *loadBalancer.LoadBalancerPropertiesFormat.Probes
-	for _, config := range configs {
-		if *config.Name == d.Get("name").(string) {
-			d.Set("name", config.Name)
+	config, _, exists := findLoadBalancerProbeByName(loadBalancer, name)
+	if !exists {
+		d.SetId("")
+		log.Printf("[INFO] LoadBalancer Probe %q not found. Removing from state", name)
+		return nil
+	}
 
-			d.Set("protocol", config.ProbePropertiesFormat.Protocol)
-			d.Set("interval_in_seconds", config.ProbePropertiesFormat.IntervalInSeconds)
-			d.Set("number_of_probes", config.ProbePropertiesFormat.NumberOfProbes)
-			d.Set("port", config.ProbePropertiesFormat.Port)
-			d.Set("request_path", config.ProbePropertiesFormat.RequestPath)
+	d.Set("name", config.Name)
+	d.Set("resource_group_name", id.ResourceGroup)
+	d.Set("protocol", config.ProbePropertiesFormat.Protocol)
+	d.Set("interval_in_seconds", config.ProbePropertiesFormat.IntervalInSeconds)
+	d.Set("number_of_probes", config.ProbePropertiesFormat.NumberOfProbes)
+	d.Set("port", config.ProbePropertiesFormat.Port)
+	d.Set("request_path", config.ProbePropertiesFormat.RequestPath)
 
-			break
+	var load_balancer_rules []string
+	if config.ProbePropertiesFormat.LoadBalancingRules != nil {
+		for _, ruleConfig := range *config.ProbePropertiesFormat.LoadBalancingRules {
+			load_balancer_rules = append(load_balancer_rules, *ruleConfig.ID)
 		}
 	}
+	d.Set("load_balancer_rules", load_balancer_rules)
 
 	return nil
 }
@@ -220,7 +237,8 @@ func resourceArmLoadBalancerProbeDelete(d *schema.ResourceData, meta interface{}
 		return errwrap.Wrapf("Error Getting LoadBalancer Name and Group: {{err}}", err)
 	}
 
-	_, err = lbClient.CreateOrUpdate(resGroup, loadBalancerName, *loadBalancer, make(chan struct{}))
+	_, error := lbClient.CreateOrUpdate(resGroup, loadBalancerName, *loadBalancer, make(chan struct{}))
+	err = <-error
 	if err != nil {
 		return errwrap.Wrapf("Error Creating/Updating LoadBalancer {{err}}", err)
 	}

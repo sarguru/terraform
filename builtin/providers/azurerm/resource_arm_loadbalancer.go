@@ -18,6 +18,9 @@ func resourceArmLoadBalancer() *schema.Resource {
 		Read:   resourecArmLoadBalancerRead,
 		Update: resourceArmLoadBalancerCreate,
 		Delete: resourceArmLoadBalancerDelete,
+		Importer: &schema.ResourceImporter{
+			State: schema.ImportStatePassthrough,
+		},
 
 		Schema: map[string]*schema.Schema{
 			"name": {
@@ -64,10 +67,12 @@ func resourceArmLoadBalancer() *schema.Resource {
 						},
 
 						"private_ip_address_allocation": {
-							Type:         schema.TypeString,
-							Optional:     true,
-							Computed:     true,
-							ValidateFunc: validateLoadBalancerPrivateIpAddressAllocation,
+							Type:             schema.TypeString,
+							Optional:         true,
+							Computed:         true,
+							ValidateFunc:     validateLoadBalancerPrivateIpAddressAllocation,
+							StateFunc:        ignoreCaseStateFunc,
+							DiffSuppressFunc: ignoreCaseDiffSuppressFunc,
 						},
 
 						"load_balancer_rules": {
@@ -85,6 +90,11 @@ func resourceArmLoadBalancer() *schema.Resource {
 						},
 					},
 				},
+			},
+
+			"private_ip_address": {
+				Type:     schema.TypeString,
+				Computed: true,
 			},
 
 			"tags": tagsSchema(),
@@ -117,7 +127,8 @@ func resourceArmLoadBalancerCreate(d *schema.ResourceData, meta interface{}) err
 		LoadBalancerPropertiesFormat: &properties,
 	}
 
-	_, err := loadBalancerClient.CreateOrUpdate(resGroup, name, loadbalancer, make(chan struct{}))
+	_, error := loadBalancerClient.CreateOrUpdate(resGroup, name, loadbalancer, make(chan struct{}))
+	err := <-error
 	if err != nil {
 		return errwrap.Wrapf("Error Creating/Updating LoadBalancer {{err}}", err)
 	}
@@ -147,6 +158,11 @@ func resourceArmLoadBalancerCreate(d *schema.ResourceData, meta interface{}) err
 }
 
 func resourecArmLoadBalancerRead(d *schema.ResourceData, meta interface{}) error {
+	id, err := parseAzureResourceID(d.Id())
+	if err != nil {
+		return err
+	}
+
 	loadBalancer, exists, err := retrieveLoadBalancerById(d.Id(), meta)
 	if err != nil {
 		return errwrap.Wrapf("Error Getting LoadBalancer By ID {{err}}", err)
@@ -157,8 +173,22 @@ func resourecArmLoadBalancerRead(d *schema.ResourceData, meta interface{}) error
 		return nil
 	}
 
+	d.Set("name", loadBalancer.Name)
+	d.Set("location", loadBalancer.Location)
+	d.Set("resource_group_name", id.ResourceGroup)
+
 	if loadBalancer.LoadBalancerPropertiesFormat != nil && loadBalancer.LoadBalancerPropertiesFormat.FrontendIPConfigurations != nil {
-		d.Set("frontend_ip_configuration", flattenLoadBalancerFrontendIpConfiguration(loadBalancer.LoadBalancerPropertiesFormat.FrontendIPConfigurations))
+		ipconfigs := loadBalancer.LoadBalancerPropertiesFormat.FrontendIPConfigurations
+		d.Set("frontend_ip_configuration", flattenLoadBalancerFrontendIpConfiguration(ipconfigs))
+
+		for _, config := range *ipconfigs {
+			if config.FrontendIPConfigurationPropertiesFormat.PrivateIPAddress != nil {
+				d.Set("private_ip_address", config.FrontendIPConfigurationPropertiesFormat.PrivateIPAddress)
+
+				// set the private IP address at most once
+				break
+			}
+		}
 	}
 
 	flattenAndSetTags(d, loadBalancer.Tags)
@@ -176,7 +206,8 @@ func resourceArmLoadBalancerDelete(d *schema.ResourceData, meta interface{}) err
 	resGroup := id.ResourceGroup
 	name := id.Path["loadBalancers"]
 
-	_, err = loadBalancerClient.Delete(resGroup, name, make(chan struct{}))
+	_, error := loadBalancerClient.Delete(resGroup, name, make(chan struct{}))
+	err = <-error
 	if err != nil {
 		return errwrap.Wrapf("Error Deleting LoadBalancer {{err}}", err)
 	}
